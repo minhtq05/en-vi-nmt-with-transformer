@@ -1,0 +1,13 @@
+evaluate==0.4.2
+numpy==2.0.0
+pytz==2024.1
+rich==13.7.1
+sacrebleu==2.4.2
+sacremoses==0.1.1
+scikit_learn==1.5.0
+tiktoken==0.7.0
+torch==2.3.0
+torchtext==0.18.0
+tqdm==4.66.4
+transformers==4.42.3
+underthesea==6.8.0
