@@ -410,7 +410,7 @@ def train_epoch(model: nn.Module, optimizer: torch.optim.Optimizer):
     total = math.ceil(len(train_data) / BATCH_SIZE)
 
     for i, (src, tgt) in tqdm(enumerate(train_dataloader), total=total, dynamic_ncols=True):
-        with torch.autocast(device_type=str(DEVICE), dtype=torch.float16):
+        with torch.autocast(device_type=str(DEVICE), dtype=torch.bfloat16):
             src = src.to(DEVICE)
             tgt = tgt.to(DEVICE)
             
@@ -462,7 +462,7 @@ def evaluate_model(model: nn.Module):
 
     with torch.no_grad():
         for i, (src, tgt) in tqdm(enumerate(val_dataloader), total=total, dynamic_ncols=True):
-            with torch.autocast(device_type=str(DEVICE), dtype=torch.float16):
+            with torch.autocast(device_type=str(DEVICE), dtype=torch.bfloat16):
                 src = src.to(DEVICE)
                 tgt = tgt.to(DEVICE)
 
