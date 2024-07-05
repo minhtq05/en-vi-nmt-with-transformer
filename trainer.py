@@ -1,5 +1,4 @@
 import torch
-import torchtext; torchtext.disable_torchtext_deprecation_warning()
 import torch.nn as nn
 import torch.nn.functional as F
 from torchtext.vocab import build_vocab_from_iterator
@@ -31,23 +30,25 @@ SRC_LANGUAGE = 'en'
 TGT_LANGUAGE = 'vi'
 EMB_SIZE = 512
 NHEAD = 8
-FFN_HID_DIM = 512
+FFN_HID_DIM = 2048
 MAX_LENGTH = 1024
 BATCH_SIZE = 16
-NUM_ENCODER_LAYERS = 3
-NUM_DECODER_LAYERS = 3
-LEARNING_RATE = 1e-4
+NUM_ENCODER_LAYERS = 5
+NUM_DECODER_LAYERS = 5
+LEARNING_RATE = 1e-5
 NUM_EPOCHS = 40
 DROPOUT = 0.1
 ACTIVATION = 'gelu'
 TRAIN_SIZE = 133318
 TEST_SIZE = 1270
-BEAM_SIZE = 4
+BEAM_SIZE = 3
 PATH = "model_experiment.pth"
 UNK_IDX, PAD_IDX, BOS_IDX, EOS_IDX = 0, 1, 2, 3
 special_symbols = ['<unk>', '<pad>', '<bos>', '<eos>']
 # puncs = ['.', '!', '?', ';']
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+torch.set_default_device(DEVICE)
+print('Device:', DEVICE)
 
 """
 All special tokens
@@ -61,6 +62,7 @@ All special tokens
 &#91;
 &#93;
 """
+
 re_clean_patterns = [
     (re.compile(r"&amp; lt ;.*?&amp; gt ;"), ""),
     (re.compile(r"&amp; lt ;"), "<"),
@@ -210,7 +212,7 @@ class Seq2SeqTransformer(nn.Module):
             dropout: float,
             activation: str,
     ):
-        super().__init__()
+        super(Seq2SeqTransformer, self).__init__()
         self.transformer = nn.Transformer(
             d_model=n_embed,
             nhead=n_head,
@@ -227,7 +229,7 @@ class Seq2SeqTransformer(nn.Module):
         self.positional_encoding = PositionalEncoding(n_embed=n_embed, dropout=dropout)
 
     def generator(self, x):
-        return F.softmax(self._generator(self._inner_layer(x)), dim=-1)
+        return self._generator(self._inner_layer(x))
             
     def forward(
             self,
@@ -328,40 +330,41 @@ def greedy_decode(model: nn.Module, src, src_mask, max_len, start_symbol, **kwar
                 break
     return ys
                 
-def beam_search_decode(model: nn.Module, src, src_mask, max_len, start_symbol, beam_size: int):
-    # Certified
-    model.eval()
-    src = src.to(DEVICE)
-    src_mask = src_mask.to(DEVICE)
+# def beam_search_decode(model: nn.Module, src, src_mask, max_len, start_symbol, beam_size: int):
+#     # Certified
+#     alpha = 0.75
+#     model.eval()
+#     src = src.to(DEVICE)
+#     src_mask = src_mask.to(DEVICE)
     
-    memory = model.encode(src, src_mask)
-    beams = [([[start_symbol]], 0.0)] # (T, beam_size)
-    with torch.no_grad():
-        for it in range(max_len-1):
-            if it <= 3:
-                k = 1
-            else:
-                k = beam_size
-            new_beams = []
-            for (ys, score) in beams:
-                # ys (T), prob (1)
-                if ys[-1][0] == EOS_IDX:
-                    new_beams.append(tuple((ys, score)))
-                    continue
-                memory = memory.to(DEVICE)
-                ys = torch.as_tensor(ys, device=DEVICE) # (T, B)
-                tgt_mask = (generate_square_subsequent_mask(ys.size(0)).type(torch.bool)).to(DEVICE)
-                out = model.decode(ys, memory, tgt_mask) # (1, C)
-                out = out.transpose(0, 1)
-                prob = model.generator(out[:, -1]) # (C, 1) -> # (vocab_size, 1)
-                assert abs(torch.sum(prob) - 1) < 1e-3
-                prob, next_word_idxs = torch.topk(prob, k, dim=1) # -> ((beam_size), (beam_size))
-                prob, next_word_idxs = prob[0].tolist(), next_word_idxs[0].tolist()
-                for p, i in zip(prob, next_word_idxs):
-                    new_beams.append((ys.tolist() + [[i]], (score + torch.log(p))))
-            beams = sorted(new_beams, key=lambda x: x[1], reverse=True)[:k]
-    # return [torch.as_tensor(beams[i][0]) for i in range(beam_size)]
-    return torch.as_tensor(beams[0][0])
+#     memory = model.encode(src, src_mask)
+#     beams = [([[start_symbol]], 0.0)] # (T, beam_size)
+#     with torch.no_grad():
+#         for it in range(max_len-1):
+#             if it <= 3:
+#                 k = 1
+#             else:
+#                 k = beam_size
+#             new_beams = []
+#             for ys, score in beams:
+#                 # ys (T), prob (1)
+#                 if ys[-1][0] == EOS_IDX:
+#                     new_beams.append((ys, score))
+#                     continue
+#                 memory = memory.to(DEVICE)
+#                 ys = torch.as_tensor(ys, device=DEVICE) # (T, B)
+#                 tgt_mask = (generate_square_subsequent_mask(ys.size(0)).type(torch.bool)).to(DEVICE)
+#                 out = model.decode(ys, memory, tgt_mask) # (1, C)
+#                 out = out.transpose(0, 1)
+#                 prob = torch.log_softmax(model.generator(out[:, -1]), dim=-1) # (C, 1) -> # (vocab_size, 1)
+#                 # assert abs(torch.sum(prob) - 1) < 1e-3
+#                 prob, next_word_idxs = torch.topk(prob, k, dim=1) # -> ((beam_size), (beam_size))
+#                 prob, next_word_idxs = prob[0].tolist(), next_word_idxs[0].tolist()
+#                 for p, i in zip(prob, next_word_idxs):
+#                     new_beams.append((ys.tolist() + [[i]], (score / max(1, it ** alpha) - p) * (it + 1) ** alpha))
+#             beams = sorted(new_beams, key=lambda x: x[1], reverse=True)[:k]
+#     # return [torch.as_tensor(beams[i][0]) for i in range(beam_size)]
+#     return torch.as_tensor(beams[0][0])
         
 def translate_greedy(model: nn.Module, src_sentence: str):
     # Certified
@@ -375,54 +378,68 @@ def translate_greedy(model: nn.Module, src_sentence: str):
         src_mask = (torch.zeros(num_tokens, num_tokens, device=DEVICE)).type(torch.bool)
         tgt_tokens = greedy_decode(model=model, src=src, src_mask=src_mask, max_len=int(1.6 * num_tokens), start_symbol=BOS_IDX).flatten()
         
-    return " ".join(vocab_transform[TGT_LANGUAGE].lookup_tokens(list(tgt_tokens.cpu().numpy()))).replace("<bos>", "").replace("<eos>", "").replace("<pad>", "").replace("<sep>", "")
+    return " ".join(vocab_transform[TGT_LANGUAGE].lookup_tokens(list(tgt_tokens.cpu().numpy()))).replace("<bos>", "").replace("<eos>", "").replace("<pad>", "").replace("<unk>", "")
 
-def translate_beam_search(model: nn.Module, src_sentence: str):
-    # Certified
-    model.eval()
+# def translate_beam_search(model: nn.Module, src_sentence: str):
+#     # Certified
+#     model.eval()
     
-    src_sentence = mt.tokenize(src_sentence, return_str=True)
-    with torch.no_grad():
-        src = text_transform[SRC_LANGUAGE](src_sentence).view(-1, 1)
-        num_tokens = src.shape[0]
-        src_mask = (torch.zeros(num_tokens, num_tokens, device=DEVICE)).type(torch.bool)
-        tgt_tokens = beam_search_decode(model=model, src=src, src_mask=src_mask, max_len=int(1.6 * num_tokens), start_symbol=BOS_IDX, beam_size=BEAM_SIZE).flatten()
+#     src_sentence = mt.tokenize(src_sentence, return_str=True)
+#     with torch.no_grad():
+#         src = text_transform[SRC_LANGUAGE](src_sentence).view(-1, 1)
+#         num_tokens = src.shape[0]
+#         src_mask = (torch.zeros(num_tokens, num_tokens, device=DEVICE)).type(torch.bool)
+#         tgt_tokens = beam_search_decode(model=model, src=src, src_mask=src_mask, max_len=int(1.6 * num_tokens), start_symbol=BOS_IDX, beam_size=BEAM_SIZE).flatten()
         
-    return " ".join(vocab_transform[TGT_LANGUAGE].lookup_tokens(list(tgt_tokens.cpu().numpy()))).replace("<bos>", "").replace("<eos>", "").replace("<pad>", "").replace("<sep>", "")
+#     return " ".join(vocab_transform[TGT_LANGUAGE].lookup_tokens(list(tgt_tokens.cpu().numpy()))).replace("<bos>", "").replace("<eos>", "").replace("<pad>", "").replace("<unk>", "")
 
 def train_epoch(model: nn.Module, optimizer: torch.optim.Optimizer):
     # Certified
     model.train()
 
+    scaler = torch.cuda.amp.GradScaler()
+
     losses = 0
-    train_dataloader = DataLoader(train_data, batch_size=BATCH_SIZE, collate_fn=collate_fn, shuffle=True)
+    train_dataloader = DataLoader(
+        train_data, 
+        batch_size=BATCH_SIZE, 
+        collate_fn=collate_fn, 
+        shuffle=True,
+        generator=torch.Generator(device='cuda')
+    )
     total = math.ceil(len(train_data) / BATCH_SIZE)
 
     for i, (src, tgt) in tqdm(enumerate(train_dataloader), total=total, dynamic_ncols=True):
-        src = src.to(DEVICE)
-        tgt = tgt.to(DEVICE)
+        with torch.autocast(device_type=str(DEVICE), dtype=torch.float16):
+            src = src.to(DEVICE)
+            tgt = tgt.to(DEVICE)
+            
+            tgt_input = tgt[:-1, :] # (T, B)
 
-        tgt_input = tgt[:-1, :] # (T, B)
+            src_mask, tgt_mask, src_padding_mask, tgt_padding_mask = create_mask(src, tgt_input)
 
-        src_mask, tgt_mask, src_padding_mask, tgt_padding_mask = create_mask(src, tgt_input)
+            logits = model(src, tgt_input, src_mask, tgt_mask,src_padding_mask, tgt_padding_mask, src_padding_mask) # (T, B, tgt_vocab_size)
 
-        logits = model(src, tgt_input, src_mask, tgt_mask,src_padding_mask, tgt_padding_mask, src_padding_mask) # (T, B, tgt_vocab_size)
+
+            tgt_out = tgt[1:, :].type(torch.long) # (T, B)
+            loss = loss_fn(logits.reshape(-1, logits.shape[-1]), tgt_out.reshape(-1))
+
+        scaler.scale(loss).backward()
+        # loss.backward()
+        scaler.step(optimizer)
+        # optimizer.step()
+        losses += loss.item()
+
+        scaler.update()
 
         optimizer.zero_grad(set_to_none=True)
-
-        tgt_out = tgt[1:, :].type(torch.long) # (T, B)
-        loss = loss_fn(logits.reshape(-1, logits.shape[-1]), tgt_out.reshape(-1))
-        loss.backward()
-
-        optimizer.step()
-        losses += loss.item()
 
         if i % 500 == 0:
             wandb.log({"train_loss:": loss.item()})
 
-        if i % 20 == 0:
-            torch.cuda.empty_cache()
-            gc.collect()
+        # if i % 50 == 0:
+            # torch.cuda.empty_cache()
+        #     gc.collect()
 
     torch.cuda.empty_cache()
     gc.collect()
@@ -434,27 +451,34 @@ def evaluate_model(model: nn.Module):
     model.eval()
     losses = 0
 
-    val_dataloader = DataLoader(val_data, batch_size=BATCH_SIZE, collate_fn=collate_fn, shuffle=True)
+    val_dataloader = DataLoader(
+        val_data, 
+        batch_size=BATCH_SIZE, 
+        collate_fn=collate_fn, 
+        shuffle=True,
+        generator=torch.Generator(device='cuda')
+    )
     total = math.ceil(len(val_data) / BATCH_SIZE)
 
     with torch.no_grad():
         for i, (src, tgt) in tqdm(enumerate(val_dataloader), total=total, dynamic_ncols=True):
-            src = src.to(DEVICE)
-            tgt = tgt.to(DEVICE)
+            with torch.autocast(device_type=str(DEVICE), dtype=torch.float16):
+                src = src.to(DEVICE)
+                tgt = tgt.to(DEVICE)
 
-            tgt_input = tgt[:-1, :] # (T, B)
+                tgt_input = tgt[:-1, :] # (T, B)
 
-            src_mask, tgt_mask, src_padding_mask, tgt_padding_mask = create_mask(src, tgt_input)
+                src_mask, tgt_mask, src_padding_mask, tgt_padding_mask = create_mask(src, tgt_input)
 
-            logits = model(src, tgt_input, src_mask, tgt_mask,src_padding_mask, tgt_padding_mask, src_padding_mask)
+                logits = model(src, tgt_input, src_mask, tgt_mask,src_padding_mask, tgt_padding_mask, src_padding_mask)
 
-            tgt_out = tgt[1:, :].type(torch.long) # (T, B)
-            loss = loss_fn(logits.reshape(-1, logits.shape[-1]), tgt_out.reshape(-1))
-            losses += loss.item()
+                tgt_out = tgt[1:, :].type(torch.long) # (T, B)
+                loss = loss_fn(logits.reshape(-1, logits.shape[-1]), tgt_out.reshape(-1))
+                losses += loss.item()
 
-            if i % 20 == 0:
-                torch.cuda.empty_cache()
-                gc.collect()
+            # if i % 50 == 0:
+            #     torch.cuda.empty_cache()
+            #     gc.collect()
 
     torch.cuda.empty_cache()
     gc.collect()
@@ -468,7 +492,7 @@ def calculate_bleu_greedy(model, epoch):
     print("Calculating BLEU score with greedy translate...")
     model.eval()
     pred_greedy = []
-    for sent in tqdm(en_test):
+    for sent in tqdm(en_test, dynamic_ncols=True):
         text = translate_greedy(model, sent)
         text = text.split(' ')
         text = md.detokenize(text)
@@ -483,24 +507,24 @@ def calculate_bleu_greedy(model, epoch):
     res = bleu.corpus_score(pred_greedy, ref)
     return res
 
-def calculate_bleu_beam_search(model, epoch):
-    print("Calculating BLEU score with beam search translate...")
-    model.eval()
-    pred_beam_search = []
-    for sent in tqdm(en_test):
-        text = translate_beam_search(model, sent)
-        text = text.split(' ')
-        text = md.detokenize(text)
-        pred_beam_search.append(text)
+# def calculate_bleu_beam_search(model, epoch):
+#     print("Calculating BLEU score with beam search translate...")
+#     model.eval()
+#     pred_beam_search = []
+#     for sent in tqdm(en_test, dynamic_ncols=True):
+#         text = translate_beam_search(model, sent)
+#         text = text.split(' ')
+#         text = md.detokenize(text)
+#         pred_beam_search.append(text)
 
-    with open(f"bleu/beam_search/{epoch}_translation.txt", "w") as f:
-        for sent in pred_beam_search:
-            f.write(sent + "\n\n")
+#     with open(f"bleu/beam_search/{epoch}_translation.txt", "w") as f:
+#         for sent in pred_beam_search:
+#             f.write(sent + "\n\n")
 
-    ref = [[md.detokenize(s.split(' ')) for s in vi_test]]
-    bleu = BLEU()
-    res = bleu.corpus_score(pred_beam_search, ref)
-    return res
+#     ref = [[md.detokenize(s.split(' ')) for s in vi_test]]
+#     bleu = BLEU()
+#     res = bleu.corpus_score(pred_beam_search, ref)
+#     return res
 
 # Certified
 def train(model: nn.Module, optimizer: torch.optim.Optimizer, num_epochs = NUM_EPOCHS):
@@ -521,13 +545,13 @@ def train(model: nn.Module, optimizer: torch.optim.Optimizer, num_epochs = NUM_E
     best_bleu_score = 0.0
     print("First eval loss:", evaluate_model(model=model))
     bleu_score_greedy = calculate_bleu_greedy(model, "init")
-    bleu_score_beam_search = calculate_bleu_beam_search(model, "init")
+    # bleu_score_beam_search = calculate_bleu_beam_search(model, "init")
     print("First BLEU score:")
     print("bleu_score_greedy:", bleu_score_greedy)
-    print("bleu_score_beam_search:", bleu_score_beam_search)
+    # print("bleu_score_beam_search:", bleu_score_beam_search)
     bleu_score_greedy = float(str(bleu_score_greedy)[6:12])
-    bleu_score_beam_search = float(str(bleu_score_beam_search)[6:12])
-    print("bleu: ", bleu_score_greedy, bleu_score_beam_search)
+    # bleu_score_beam_search = float(str(bleu_score_beam_search)[6:12])
+    # print("bleu: ", bleu_score_greedy, bleu_score_beam_search)
     print("First")
 
     """
@@ -556,19 +580,20 @@ def train(model: nn.Module, optimizer: torch.optim.Optimizer, num_epochs = NUM_E
 
             val_loss = evaluate_model(model)
             bleu_score_greedy = calculate_bleu_greedy(model, epoch)
-            bleu_score_beam_search = calculate_bleu_beam_search(model, epoch)
+            # bleu_score_beam_search = calculate_bleu_beam_search(model, epoch)
             print("greedy:", bleu_score_greedy)
-            print("beam_search:", bleu_score_beam_search)
+            # print("beam_search:", bleu_score_beam_search)
             bleu_score_greedy = float(str(bleu_score_greedy)[6:12])
-            bleu_score_beam_search = float(str(bleu_score_beam_search)[6:12])
-            bleu_score = max(bleu_score_greedy, bleu_score_beam_search)
+            # bleu_score_beam_search = float(str(bleu_score_beam_search)[6:12])
+            # bleu_score = max(bleu_score_greedy, bleu_score_beam_search)
+            bleu_score = bleu_score_greedy
             print(f"Epoch: {epoch}, Train loss: {train_loss:.3f}, Val loss: {val_loss:.3f}")
             print(f"BLEU Score of current model: {bleu_score}")
 
             wandb.log({
                 "val_loss:": val_loss,
                 "bleu_score_greedy": bleu_score_greedy,
-                "bleu_score_beam_search": bleu_score_beam_search,
+                # "bleu_score_beam_search": bleu_score_beam_search,
                 "max_bleu_score": bleu_score,
             })
 
@@ -579,16 +604,20 @@ def train(model: nn.Module, optimizer: torch.optim.Optimizer, num_epochs = NUM_E
                 patient = 10
                 with open('training.log', 'a') as log:
                     log.write("translate:\n")
-                    if bleu_score_greedy > bleu_score_beam_search:
-                        log.write("greedy!\n")
-                        for i, sent in enumerate(demo_sents):
-                            log.write(f"{i}.{translate_greedy(model, sent)}\n")
-                        log.write("\n")
-                    else: 
-                        log.write("beam search!\n")
-                        for i, sent in enumerate(demo_sents):
-                            log.write(f"{i}.{translate_beam_search(model, sent)}\n")
-                        log.write("\n")
+                    # if bleu_score_greedy > bleu_score_beam_search:
+                    #     log.write("greedy!\n")
+                    #     for i, sent in enumerate(demo_sents):
+                    #         log.write(f"{i}.{translate_greedy(model, sent)}\n")
+                    #     log.write("\n")
+                    # else: 
+                    #     log.write("beam search!\n")
+                    #     for i, sent in enumerate(demo_sents):
+                    #         log.write(f"{i}.{translate_beam_search(model, sent)}\n")
+                        # log.write("\n")
+                    log.write("greedy!\n")
+                    for i, sent in enumerate(demo_sents):
+                        log.write(f"{i}.{translate_greedy(model, sent)}\n")
+                    log.write("\n")
             else:
                 patient -= 1
                 print("Patient reduced to", patient)
@@ -627,11 +656,11 @@ def read_dataset():
     with open('./data/vi.txt', 'r') as f:
         vi = f.readlines()
 
-    with open('./data/train.vi', 'r') as f:
-        vi_only = f.readlines()
+    # with open('./data/train.vi', 'r') as f:
+    #     vi_only = f.readlines()
 
-    vi_only = random.sample(vi_only, TRAIN_SIZE)
-    vi_only = [s.lower() for s in vi_only]
+    # vi_only = random.sample(vi_only, TRAIN_SIZE)
+    # vi_only = [s.lower() for s in vi_only]
 
 
     # assert(len(en) == len(vi), f"Expected equal number of sentences, got {len(en)} and {len(vi)} instead.")
@@ -689,9 +718,10 @@ if __process == 'train':
             # Training data Iterator
             # Create torchtext's Vocab object
             vocab_transform[ln] = build_vocab_from_iterator(yield_tokens(train_data, ln),
-                                                            min_freq=1,
+                                                            min_freq=2,
                                                             specials=special_symbols,
-                                                            special_first=True)
+                                                            special_first=True,
+                                                            max_tokens=30000)
 
         for ln in [SRC_LANGUAGE, TGT_LANGUAGE]:
             vocab_transform[ln].set_default_index(UNK_IDX)
@@ -750,9 +780,9 @@ if __process == 'train':
 
     transformer = Seq2SeqTransformer(NUM_ENCODER_LAYERS, NUM_DECODER_LAYERS, EMB_SIZE, NHEAD, SRC_VOCAB_SIZE, TGT_VOCAB_SIZE, FFN_HID_DIM, DROPOUT, ACTIVATION)
 
-    optimizer = torch.optim.AdamW(params=transformer.parameters(), lr=LEARNING_RATE, betas=(0.9, 0.98), eps=1e-9)
+    optimizer = torch.optim.AdamW(params=transformer.parameters(), lr=LEARNING_RATE, betas=(0.9, 0.999), eps=1e-8)
 
-    loss_fn = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
+    loss_fn = nn.CrossEntropyLoss(ignore_index=PAD_IDX).cuda()
 
 
     # if SAVE_STATE:
@@ -866,8 +896,8 @@ if __process == 'test':
     # matches = re.findall(pattern, "Như vậy , tỷ lệ chết trẻ em &amp; lt ; 5t đã giảm 2 lần .")
     # print(matches)
 
-    # en = en_tokenizer("I &apos;ll give you one last illustration of variability , and that is -- oh , I &apos;m sorry .")
-    # vi = vi_tokenizer("Tôi sẽ nêu ra cho các bạn một ví dụ cuối cùng về sự đa dạng , đó là -- à , tôi xin lỗi .")
+    en = en_tokenizer("I &apos;ll give you one last illustration of variability , and that is -- oh , I &apos;m sorry .")
+    vi = vi_tokenizer("Tôi sẽ nêu ra cho các bạn một ví dụ cuối cùng về sự đa dạng , đó là -- à , tôi xin lỗi .")
 
-    # print(calc_bleu(en, vi))
+    print(calc_bleu(en, vi))
 
